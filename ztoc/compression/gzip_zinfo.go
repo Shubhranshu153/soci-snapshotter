@@ -27,12 +27,15 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"sync"
 	"unsafe"
 )
 
 // GzipZinfo is a go struct wrapper of the gzip zinfo's C implementation.
 type GzipZinfo struct {
+	mu     sync.RWMutex
 	cZinfo *C.struct_gzip_zinfo
+	closed bool
 }
 
 // newGzipZinfo creates a new instance of `GzipZinfo` from cZinfo byte blob on zTOC.
@@ -67,13 +70,29 @@ func newGzipZinfoFromFile(gzipFile string, spanSize int64) (*GzipZinfo, error) {
 
 // Close calls `C.free` on the pointer to `C.struct_gzip_zinfo`.
 func (i *GzipZinfo) Close() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if i.closed {
+		return
+	}
+
 	if i.cZinfo != nil {
 		C.free(unsafe.Pointer(i.cZinfo))
+		i.cZinfo = nil
 	}
+	i.closed = true
 }
 
 // Bytes returns the byte slice containing the zinfo.
 func (i *GzipZinfo) Bytes() ([]byte, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return nil, fmt.Errorf("gzip zinfo is closed")
+	}
+
 	blobSize := C.get_blob_size(i.cZinfo)
 	bytes := make([]byte, uint64(blobSize))
 	if len(bytes) == 0 {
@@ -89,16 +108,37 @@ func (i *GzipZinfo) Bytes() ([]byte, error) {
 
 // MaxSpanID returns the max span ID.
 func (i *GzipZinfo) MaxSpanID() SpanID {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return 0
+	}
+
 	return SpanID(C.get_max_span_id(i.cZinfo))
 }
 
 // SpanSize returns the span size of the constructed ztoc.
 func (i *GzipZinfo) SpanSize() Offset {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return 0
+	}
+
 	return Offset(i.cZinfo.span_size)
 }
 
 // UncompressedOffsetToSpanID returns the ID of the span containing the data pointed by uncompressed offset.
 func (i *GzipZinfo) UncompressedOffsetToSpanID(offset Offset) SpanID {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return 0
+	}
+
 	return SpanID(C.pt_index_from_ucmp_offset(i.cZinfo, C.long(offset)))
 }
 
@@ -114,6 +154,14 @@ func (i *GzipZinfo) ExtractDataFromBuffer(compressedBuf []byte, uncompressedSize
 	if uncompressedSize == 0 {
 		return []byte{}, nil
 	}
+
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return nil, fmt.Errorf("gzip zinfo is closed")
+	}
+
 	bytes := make([]byte, uncompressedSize)
 	ret := C.extract_data_from_buffer(
 		unsafe.Pointer(&compressedBuf[0]),
@@ -142,6 +190,14 @@ func (i *GzipZinfo) ExtractDataFromFile(fileName string, uncompressedSize, uncom
 	if uncompressedSize == 0 {
 		return []byte{}, nil
 	}
+
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return nil, fmt.Errorf("gzip zinfo is closed")
+	}
+
 	bytes := make([]byte, uncompressedSize)
 	ret := C.extract_data_from_file(cstr, i.cZinfo, C.off_t(uncompressedOffset), unsafe.Pointer(&bytes[0]), C.int(uncompressedSize))
 	if ret <= 0 {
@@ -194,15 +250,36 @@ func (i *GzipZinfo) VerifyHeader(r io.Reader) error {
 
 // getCompressedOffset wraps `C.get_comp_off` and returns the offset for the span in the compressed stream.
 func (i *GzipZinfo) getCompressedOffset(spanID SpanID) Offset {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return 0
+	}
+
 	return Offset(C.get_comp_off(i.cZinfo, C.int(spanID)))
 }
 
 // hasBits wraps `C.has_bits` and returns true if any data is contained in the previous span.
 func (i *GzipZinfo) hasBits(spanID SpanID) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return false
+	}
+
 	return C.has_bits(i.cZinfo, C.int(spanID)) != 0
 }
 
 // getUncompressedOffset wraps `C.get_uncomp_off` and returns the offset for the span in the uncompressed stream.
 func (i *GzipZinfo) getUncompressedOffset(spanID SpanID) Offset {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if i.closed {
+		return 0
+	}
+
 	return Offset(C.get_ucomp_off(i.cZinfo, C.int(spanID)))
 }
